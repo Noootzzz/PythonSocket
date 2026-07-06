@@ -13,6 +13,7 @@ ADDR = (SERVER,PORT)
 FORMAT = 'utf-8'
 DISCONNECT_MESSAGE = "/quit"
 USER_DATA_FILE_NAME = "user_data.json"
+TIMEOUT = 10
 
 json_lock = threading.Lock()
 
@@ -115,6 +116,7 @@ def handle_command(conn, addr, username, msg):
 def handle_client(conn, addr):
     print(f"[SERVER] New connection : {addr}")
     username = None
+    conn.settimeout(TIMEOUT)
     try:
         data = conn.recv(1024)
         if not data:
@@ -151,6 +153,12 @@ def handle_client(conn, addr):
             print(f"[{username}] {msg}")
             broadcast(f"[{username}] {msg}", exclude_conn=conn)
 
+    except socket.timeout:
+        try:
+            conn.sendall("[SERVER] Déconnecté pour inactivité.".encode(FORMAT))
+        except OSError:
+            pass
+        print(f"[SERVER] {addr} timeout.")
     except ConnectionResetError:
         print(f"[SERVER] ERROR : {addr} disconnected.")
     finally:
