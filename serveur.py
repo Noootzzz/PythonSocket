@@ -16,19 +16,27 @@ USER_DATA_FILE_NAME = "user_data.json"
 
 json_lock = threading.Lock()
 
-clients = []
+clients = {}
 clients_lock = threading.Lock()
 
 
 def broadcast(message, exclude_conn=None):
     with clients_lock:
-        for conn, _ in clients:
+        for conn in clients:
             if conn is exclude_conn:
                 continue
             try:
                 conn.sendall(message.encode(FORMAT))
             except OSError:
                 pass
+
+
+def find_conn_by_name(name):
+    with clients_lock:
+        for conn, user in clients.items():
+            if user == name:
+                return conn
+    return None
 
 
 def save_user(addr, username):
@@ -57,19 +65,51 @@ def save_user(addr, username):
             json.dump(users, file, indent=4, ensure_ascii=False)
 
 
-def handle_command(conn, username, msg):
-    cmd = msg.split()[0].lower()
+def handle_command(conn, addr, username, msg):
+    parts = msg.split()
+    cmd = parts[0].lower()
 
     if cmd == "/time":
         now = datetime.datetime.now().strftime("%H:%M:%S")
         conn.sendall(f"[SERVER] Heure du serveur : {now}".encode(FORMAT))
-        return True
+        return True, None
 
     if cmd == "/ping":
         conn.sendall("/pong".encode(FORMAT))
-        return True
+        return True, None
 
-    return False
+    if cmd == "/rename":
+        if len(parts) < 2:
+            conn.sendall("[SERVER] Usage : /rename <nouveau_pseudo>".encode(FORMAT))
+            return True, None
+        new_name = parts[1]
+        with clients_lock:
+            if new_name in clients.values():
+                conn.sendall("[SERVER] Ce pseudo est déjà pris.".encode(FORMAT))
+                return True, None
+            clients[conn] = new_name
+        save_user(addr, new_name)
+        conn.sendall(f"[SERVER] Tu es maintenant '{new_name}'.".encode(FORMAT))
+        broadcast(f"[SERVER] {username} est maintenant {new_name}.", exclude_conn=conn)
+        print(f"[SERVER] {username} -> {new_name}")
+        return True, new_name
+
+    if cmd == "/mp":
+        cut = msg.split(maxsplit=2)
+        if len(cut) < 3:
+            conn.sendall("[SERVER] Usage : /mp <pseudo> <message>".encode(FORMAT))
+            return True, None
+        target_name = cut[1]
+        private_msg = cut[2]
+        target = find_conn_by_name(target_name)
+        if target is None:
+            conn.sendall(f"[SERVER] Utilisateur '{target_name}' introuvable.".encode(FORMAT))
+            return True, None
+        target.sendall(f"[MP de {username}] {private_msg}".encode(FORMAT))
+        conn.sendall(f"[MP à {target_name}] {private_msg}".encode(FORMAT))
+        return True, None
+
+    return False, None
 
 
 def handle_client(conn, addr):
@@ -83,7 +123,7 @@ def handle_client(conn, addr):
         save_user(addr, username)
 
         with clients_lock:
-            clients.append((conn, username))
+            clients[conn] = username
 
         conn.sendall(f"Bienvenue {username} !".encode(FORMAT))
         broadcast(f"[SERVER] {username} a rejoint le chat.", exclude_conn=conn)
@@ -101,8 +141,11 @@ def handle_client(conn, addr):
                 break
 
             if msg.startswith("/"):
-                if not handle_command(conn, username, msg):
+                handled, new_name = handle_command(conn, addr, username, msg)
+                if not handled:
                     conn.sendall(f"[SERVER] Commande inconnue : {msg}".encode(FORMAT))
+                elif new_name:
+                    username = new_name
                 continue
 
             print(f"[{username}] {msg}")
@@ -112,7 +155,7 @@ def handle_client(conn, addr):
         print(f"[SERVER] ERROR : {addr} disconnected.")
     finally:
         with clients_lock:
-            clients[:] = [c for c in clients if c[0] is not conn]
+            clients.pop(conn, None)
         conn.close()
         if username:
             broadcast(f"[SERVER] {username} a quitté le chat.")
