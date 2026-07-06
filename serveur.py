@@ -5,6 +5,7 @@ import socket
 import threading
 import os
 import json
+import datetime
 
 SERVER = socket.gethostbyname(socket.gethostname())
 PORT = 5000
@@ -56,6 +57,21 @@ def save_user(addr, username):
             json.dump(users, file, indent=4, ensure_ascii=False)
 
 
+def handle_command(conn, username, msg):
+    cmd = msg.split()[0].lower()
+
+    if cmd == "/time":
+        now = datetime.datetime.now().strftime("%H:%M:%S")
+        conn.sendall(f"[SERVER] Heure du serveur : {now}".encode(FORMAT))
+        return True
+
+    if cmd == "/ping":
+        conn.sendall("/pong".encode(FORMAT))
+        return True
+
+    return False
+
+
 def handle_client(conn, addr):
     print(f"[SERVER] New connection : {addr}")
     username = None
@@ -83,6 +99,11 @@ def handle_client(conn, addr):
 
             if msg == DISCONNECT_MESSAGE:
                 break
+
+            if msg.startswith("/"):
+                if not handle_command(conn, username, msg):
+                    conn.sendall(f"[SERVER] Commande inconnue : {msg}".encode(FORMAT))
+                continue
 
             print(f"[{username}] {msg}")
             broadcast(f"[{username}] {msg}", exclude_conn=conn)

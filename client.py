@@ -4,6 +4,8 @@
 
 import socket
 import threading
+import os
+import time
 
 SERVER = socket.gethostbyname(socket.gethostname())
 PORT = 5000
@@ -15,6 +17,7 @@ client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 client.connect(ADDR)
 
 running = True
+ping_time = None
 
 
 def receive():
@@ -26,7 +29,12 @@ def receive():
             break
         if not data:
             break
-        print(f"\r{data.decode(FORMAT)}\n> ", end="")
+        response = data.decode(FORMAT)
+        if response == "/pong":
+            latency = (time.time() - ping_time) * 1000
+            print(f"\rPing : {latency:.0f} ms\n> ", end="")
+        else:
+            print(f"\r{response}\n> ", end="")
     running = False
 
 
@@ -44,6 +52,13 @@ while running:
 
     if not message:
         continue
+
+    if message == "/clear":
+        os.system("cls" if os.name == "nt" else "clear")
+        continue
+
+    if message == "/ping":
+        ping_time = time.time()
 
     client.sendall(message.encode(FORMAT))
 
