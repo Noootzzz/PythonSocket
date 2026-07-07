@@ -80,10 +80,13 @@ def has_level(role, needed):
 
 
 def load_users():
-    if os.path.exists(USER_DATA_FILE_NAME):
+    if not os.path.exists(USER_DATA_FILE_NAME):
+        return []
+    try:
         with open(USER_DATA_FILE_NAME, "r", encoding=FORMAT) as file:
             return json.load(file)
-    return []
+    except (json.JSONDecodeError, ValueError):
+        return []
 
 
 def save_users(users):
