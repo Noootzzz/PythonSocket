@@ -13,7 +13,9 @@ ADDR = (SERVER,PORT)
 FORMAT = 'utf-8'
 DISCONNECT_MESSAGE = "/quit"
 USER_DATA_FILE_NAME = "user_data.json"
-TIMEOUT = 10
+TIMEOUT = 180
+
+ROLES = {"user": 0, "moderateur": 1, "admin": 2}
 
 json_lock = threading.Lock()
 
@@ -34,36 +36,66 @@ def broadcast(message, exclude_conn=None):
 
 def find_conn_by_name(name):
     with clients_lock:
-        for conn, user in clients.items():
-            if user == name:
+        for conn, info in clients.items():
+            if info["username"] == name:
                 return conn
     return None
 
 
-def save_user(addr, username):
-    with json_lock:
-        if os.path.exists(USER_DATA_FILE_NAME):
-            with open(USER_DATA_FILE_NAME, "r", encoding=FORMAT) as file:
-                users = json.load(file)
-        else:
-            users = []
+def my_role(conn):
+    with clients_lock:
+        info = clients.get(conn)
+        return info["role"] if info else "user"
 
-        user_found = False
+
+def has_level(role, needed):
+    return ROLES.get(role, 0) >= ROLES[needed]
+
+
+def load_users():
+    if os.path.exists(USER_DATA_FILE_NAME):
+        with open(USER_DATA_FILE_NAME, "r", encoding=FORMAT) as file:
+            return json.load(file)
+    return []
+
+
+def save_users(users):
+    with open(USER_DATA_FILE_NAME, "w", encoding=FORMAT) as file:
+        json.dump(users, file, indent=4, ensure_ascii=False)
+
+
+def register_user(addr, username):
+    with json_lock:
+        users = load_users()
+        found = None
         for user in users:
             if user["username"] == username:
-                user["ip"] = addr[0]
-                user["port"] = addr[1]
-                user_found = True
+                found = user
                 break
-        if not user_found:
-            users.append({
-                "ip": addr[0],
-                "port": addr[1],
-                "username": username,
-            })
+        if found is None:
+            found = {"ip": addr[0], "port": addr[1], "username": username, "role": "user"}
+            users.append(found)
+        else:
+            found["ip"] = addr[0]
+            found["port"] = addr[1]
+            found.setdefault("role", "user")
 
-        with open(USER_DATA_FILE_NAME, "w", encoding=FORMAT) as file:
-            json.dump(users, file, indent=4, ensure_ascii=False)
+        if not any(u.get("role") == "admin" for u in users):
+            found["role"] = "admin"
+
+        save_users(users)
+        return found["role"]
+
+
+def set_role_in_file(username, role):
+    with json_lock:
+        users = load_users()
+        for user in users:
+            if user["username"] == username:
+                user["role"] = role
+                save_users(users)
+                return True
+        return False
 
 
 def handle_command(conn, addr, username, msg):
@@ -79,17 +111,26 @@ def handle_command(conn, addr, username, msg):
         conn.sendall("/pong".encode(FORMAT))
         return True, None
 
+    if cmd == "/role":
+        conn.sendall(f"[SERVER] Ton rôle : {my_role(conn)}.".encode(FORMAT))
+        return True, None
+
     if cmd == "/rename":
         if len(parts) < 2:
             conn.sendall("[SERVER] Usage : /rename <nouveau_pseudo>".encode(FORMAT))
             return True, None
         new_name = parts[1]
         with clients_lock:
-            if new_name in clients.values():
-                conn.sendall("[SERVER] Ce pseudo est déjà pris.".encode(FORMAT))
-                return True, None
-            clients[conn] = new_name
-        save_user(addr, new_name)
+            taken = any(info["username"] == new_name for info in clients.values())
+        if taken:
+            conn.sendall("[SERVER] Ce pseudo est déjà pris.".encode(FORMAT))
+            return True, None
+        current_role = my_role(conn)
+        register_user(addr, new_name)
+        set_role_in_file(new_name, current_role)
+        with clients_lock:
+            if conn in clients:
+                clients[conn]["username"] = new_name
         conn.sendall(f"[SERVER] Tu es maintenant '{new_name}'.".encode(FORMAT))
         broadcast(f"[SERVER] {username} est maintenant {new_name}.", exclude_conn=conn)
         print(f"[SERVER] {username} -> {new_name}")
@@ -110,6 +151,32 @@ def handle_command(conn, addr, username, msg):
         conn.sendall(f"[MP à {target_name}] {private_msg}".encode(FORMAT))
         return True, None
 
+    if cmd in ("/setadmin", "/setmodo", "/remadmin", "/remmodo"):
+        if not has_level(my_role(conn), "admin"):
+            conn.sendall("[SERVER] Commande réservée aux admins.".encode(FORMAT))
+            return True, None
+        if len(parts) < 2:
+            conn.sendall(f"[SERVER] Usage : {cmd} <pseudo>".encode(FORMAT))
+            return True, None
+        target_name = parts[1]
+        if cmd == "/setadmin":
+            new_role = "admin"
+        elif cmd == "/setmodo":
+            new_role = "moderateur"
+        else:
+            new_role = "user"
+        if not set_role_in_file(target_name, new_role):
+            conn.sendall(f"[SERVER] Utilisateur '{target_name}' introuvable.".encode(FORMAT))
+            return True, None
+        target = find_conn_by_name(target_name)
+        if target is not None:
+            with clients_lock:
+                clients[target]["role"] = new_role
+            target.sendall(f"[SERVER] Ton rôle est maintenant : {new_role}.".encode(FORMAT))
+        conn.sendall(f"[SERVER] {target_name} est maintenant {new_role}.".encode(FORMAT))
+        print(f"[SERVER] {username} a mis {target_name} en {new_role}")
+        return True, None
+
     return False, None
 
 
@@ -122,14 +189,14 @@ def handle_client(conn, addr):
         if not data:
             return
         username = data.decode(FORMAT).strip()
-        save_user(addr, username)
+        role = register_user(addr, username)
 
         with clients_lock:
-            clients[conn] = username
+            clients[conn] = {"username": username, "role": role, "muted": False, "addr": addr}
 
-        conn.sendall(f"Bienvenue {username} !".encode(FORMAT))
+        conn.sendall(f"Bienvenue {username} ! (rôle : {role})".encode(FORMAT))
         broadcast(f"[SERVER] {username} a rejoint le chat.", exclude_conn=conn)
-        print(f"[SERVER] {username} joined ({addr})")
+        print(f"[SERVER] {username} joined ({addr}) role={role}")
 
         while True:
             data = conn.recv(1024)
