@@ -7,17 +7,38 @@ import threading
 import os
 import time
 
+if os.name == "nt":
+    os.system("")
+
 SERVER = socket.gethostbyname(socket.gethostname())
 PORT = 5000
 ADDR = (SERVER,PORT)
 FORMAT = 'utf-8'
 DISCONNECT_MESSAGE = "/quit"
 
+RESET = "\x1b[0m"
+YELLOW = "\x1b[33m"
+MAGENTA = "\x1b[35m"
+CYAN = "\x1b[36m"
+GREY = "\x1b[90m"
+
 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 client.connect(ADDR)
 
 running = True
 ping_time = None
+
+
+def colorize(text):
+    if text.startswith("[SERVER]") or text.startswith("Bienvenue") or text.startswith("Déconnecté"):
+        return YELLOW + text + RESET
+    if text.startswith("[") and "[MP" in text:
+        return MAGENTA + text + RESET
+    return CYAN + text + RESET
+
+
+def show(text):
+    print(f"\r\x1b[K{text}\n> ", end="")
 
 
 def receive():
@@ -32,9 +53,9 @@ def receive():
         response = data.decode(FORMAT)
         if response == "/pong":
             latency = (time.time() - ping_time) * 1000
-            print(f"\rPing : {latency:.0f} ms\n> ", end="")
+            show(f"{GREY}Ping : {latency:.0f} ms{RESET}")
         else:
-            print(f"\r{response}\n> ", end="")
+            show(colorize(response))
     running = False
 
 

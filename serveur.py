@@ -26,6 +26,10 @@ def clean_text(text):
     return "".join(ch for ch in text if ch.isprintable())
 
 
+def stamp():
+    return datetime.datetime.now().strftime("%H:%M")
+
+
 def valid_username(name):
     return bool(USERNAME_RE.match(name))
 
@@ -211,8 +215,8 @@ def handle_command(conn, addr, username, msg):
         if target is None:
             conn.sendall(f"[SERVER] Utilisateur '{target_name}' introuvable.".encode(FORMAT))
             return True, None
-        target.sendall(f"[MP de {username}] {private_msg}".encode(FORMAT))
-        conn.sendall(f"[MP à {target_name}] {private_msg}".encode(FORMAT))
+        target.sendall(f"[{stamp()}] [MP de {username}] {private_msg}".encode(FORMAT))
+        conn.sendall(f"[{stamp()}] [MP à {target_name}] {private_msg}".encode(FORMAT))
         return True, None
 
     if cmd in ("/setadmin", "/setmodo", "/remadmin", "/remmodo"):
@@ -409,7 +413,7 @@ def handle_client(conn, addr):
                 continue
 
             print(f"[{room}][{username}] {msg}")
-            broadcast(f"[{username}] {msg}", room=room, exclude_conn=conn)
+            broadcast(f"[{stamp()}] [{username}] {msg}", room=room, exclude_conn=conn)
 
     except socket.timeout:
         try:
