@@ -43,6 +43,7 @@ def show(text):
 
 def receive():
     global running
+    buffer = ""
     while running:
         try:
             data = client.recv(1024)
@@ -50,17 +51,21 @@ def receive():
             break
         if not data:
             break
-        response = data.decode(FORMAT)
-        if response == "/pong":
-            latency = (time.time() - ping_time) * 1000
-            show(f"{GREY}Ping : {latency:.0f} ms{RESET}")
-        else:
-            show(colorize(response))
+        buffer += data.decode(FORMAT, errors="replace")
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            if not line:
+                continue
+            if line == "/pong":
+                latency = (time.time() - ping_time) * 1000
+                show(f"{GREY}Ping : {latency:.0f} ms{RESET}")
+            else:
+                show(colorize(line))
     running = False
 
 
 name = input("> Enter your name : ")
-client.sendall(name.encode(FORMAT))
+client.sendall((name + "\n").encode(FORMAT))
 
 thread = threading.Thread(target=receive, daemon=True)
 thread.start()
@@ -81,7 +86,7 @@ while running:
     if message == "/ping":
         ping_time = time.time()
 
-    client.sendall(message.encode(FORMAT))
+    client.sendall((message + "\n").encode(FORMAT))
 
     if message == DISCONNECT_MESSAGE:
         running = False

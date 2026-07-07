@@ -7,6 +7,7 @@ import os
 import json
 import datetime
 import re
+import time
 
 SERVER = socket.gethostbyname(socket.gethostname())
 PORT = 5000
@@ -20,6 +21,15 @@ ROLES = {"user": 0, "moderateur": 1, "admin": 2}
 DEFAULT_ROOM = "general"
 MAX_MSG_LEN = 500
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,20}$")
+CHECK_INTERVAL = min(5, TIMEOUT)
+PASSIVE_COMMANDS = {"/online", "/rooms"}
+
+
+def send(sock, text):
+    try:
+        sock.sendall((text + "\n").encode(FORMAT))
+    except OSError:
+        pass
 
 
 def clean_text(text):
@@ -49,10 +59,7 @@ def broadcast(message, room=None, exclude_conn=None):
                 continue
             if room is not None and info["room"] != room:
                 continue
-            try:
-                conn.sendall(message.encode(FORMAT))
-            except OSError:
-                pass
+            send(conn, message)
 
 
 def prune_room(room):
@@ -156,8 +163,8 @@ def can_moderate(actor_conn, target_conn):
 
 
 def disconnect(target_conn, reason):
+    send(target_conn, f"[SERVER] {reason}")
     try:
-        target_conn.sendall(f"[SERVER] {reason}".encode(FORMAT))
         target_conn.shutdown(socket.SHUT_RDWR)
     except OSError:
         pass
@@ -169,29 +176,29 @@ def handle_command(conn, addr, username, msg):
 
     if cmd == "/time":
         now = datetime.datetime.now().strftime("%H:%M:%S")
-        conn.sendall(f"[SERVER] Heure du serveur : {now}".encode(FORMAT))
+        send(conn, f"[SERVER] Heure du serveur : {now}")
         return True, None
 
     if cmd == "/ping":
-        conn.sendall("/pong".encode(FORMAT))
+        send(conn, "/pong")
         return True, None
 
     if cmd == "/role":
-        conn.sendall(f"[SERVER] Ton rôle : {my_role(conn)}.".encode(FORMAT))
+        send(conn, f"[SERVER] Ton rôle : {my_role(conn)}.")
         return True, None
 
     if cmd == "/rename":
         if len(parts) < 2:
-            conn.sendall("[SERVER] Usage : /rename <nouveau_pseudo>".encode(FORMAT))
+            send(conn, "[SERVER] Usage : /rename <nouveau_pseudo>")
             return True, None
         new_name = parts[1]
         if not valid_username(new_name):
-            conn.sendall("[SERVER] Pseudo invalide (3-20 caractères : lettres, chiffres, _ ou -).".encode(FORMAT))
+            send(conn, "[SERVER] Pseudo invalide (3-20 caractères : lettres, chiffres, _ ou -).")
             return True, None
         with clients_lock:
             taken = any(info["username"] == new_name for info in clients.values())
         if taken:
-            conn.sendall("[SERVER] Ce pseudo est déjà pris.".encode(FORMAT))
+            send(conn, "[SERVER] Ce pseudo est déjà pris.")
             return True, None
         current_role = my_role(conn)
         register_user(addr, new_name)
@@ -199,7 +206,7 @@ def handle_command(conn, addr, username, msg):
         with clients_lock:
             if conn in clients:
                 clients[conn]["username"] = new_name
-        conn.sendall(f"[SERVER] Tu es maintenant '{new_name}'.".encode(FORMAT))
+        send(conn, f"[SERVER] Tu es maintenant '{new_name}'.")
         broadcast(f"[SERVER] {username} est maintenant {new_name}.", exclude_conn=conn)
         print(f"[SERVER] {username} -> {new_name}")
         return True, new_name
@@ -207,24 +214,24 @@ def handle_command(conn, addr, username, msg):
     if cmd == "/mp":
         cut = msg.split(maxsplit=2)
         if len(cut) < 3:
-            conn.sendall("[SERVER] Usage : /mp <pseudo> <message>".encode(FORMAT))
+            send(conn, "[SERVER] Usage : /mp <pseudo> <message>")
             return True, None
         target_name = cut[1]
         private_msg = cut[2]
         target = find_conn_by_name(target_name)
         if target is None:
-            conn.sendall(f"[SERVER] Utilisateur '{target_name}' introuvable.".encode(FORMAT))
+            send(conn, f"[SERVER] Utilisateur '{target_name}' introuvable.")
             return True, None
-        target.sendall(f"[{stamp()}] [MP de {username}] {private_msg}".encode(FORMAT))
-        conn.sendall(f"[{stamp()}] [MP à {target_name}] {private_msg}".encode(FORMAT))
+        send(target, f"[{stamp()}] [MP de {username}] {private_msg}")
+        send(conn, f"[{stamp()}] [MP à {target_name}] {private_msg}")
         return True, None
 
     if cmd in ("/setadmin", "/setmodo", "/remadmin", "/remmodo"):
         if not has_level(my_role(conn), "admin"):
-            conn.sendall("[SERVER] Commande réservée aux admins.".encode(FORMAT))
+            send(conn, "[SERVER] Commande réservée aux admins.")
             return True, None
         if len(parts) < 2:
-            conn.sendall(f"[SERVER] Usage : {cmd} <pseudo>".encode(FORMAT))
+            send(conn, f"[SERVER] Usage : {cmd} <pseudo>")
             return True, None
         target_name = parts[1]
         if cmd == "/setadmin":
@@ -234,31 +241,31 @@ def handle_command(conn, addr, username, msg):
         else:
             new_role = "user"
         if not set_role_in_file(target_name, new_role):
-            conn.sendall(f"[SERVER] Utilisateur '{target_name}' introuvable.".encode(FORMAT))
+            send(conn, f"[SERVER] Utilisateur '{target_name}' introuvable.")
             return True, None
         target = find_conn_by_name(target_name)
         if target is not None:
             with clients_lock:
                 clients[target]["role"] = new_role
-            target.sendall(f"[SERVER] Ton rôle est maintenant : {new_role}.".encode(FORMAT))
-        conn.sendall(f"[SERVER] {target_name} est maintenant {new_role}.".encode(FORMAT))
+            send(target, f"[SERVER] Ton rôle est maintenant : {new_role}.")
+        send(conn, f"[SERVER] {target_name} est maintenant {new_role}.")
         print(f"[SERVER] {username} a mis {target_name} en {new_role}")
         return True, None
 
     if cmd in ("/kick", "/mute", "/unmute"):
         if not has_level(my_role(conn), "moderateur"):
-            conn.sendall("[SERVER] Commande réservée aux modérateurs et admins.".encode(FORMAT))
+            send(conn, "[SERVER] Commande réservée aux modérateurs et admins.")
             return True, None
         if len(parts) < 2:
-            conn.sendall(f"[SERVER] Usage : {cmd} <pseudo>".encode(FORMAT))
+            send(conn, f"[SERVER] Usage : {cmd} <pseudo>")
             return True, None
         target_name = parts[1]
         target = find_conn_by_name(target_name)
         if target is None:
-            conn.sendall(f"[SERVER] Utilisateur '{target_name}' introuvable.".encode(FORMAT))
+            send(conn, f"[SERVER] Utilisateur '{target_name}' introuvable.")
             return True, None
         if not can_moderate(conn, target):
-            conn.sendall("[SERVER] Tu ne peux pas modérer cet utilisateur.".encode(FORMAT))
+            send(conn, "[SERVER] Tu ne peux pas modérer cet utilisateur.")
             return True, None
 
         if cmd == "/kick":
@@ -268,29 +275,29 @@ def handle_command(conn, addr, username, msg):
         elif cmd == "/mute":
             with clients_lock:
                 clients[target]["muted"] = True
-            target.sendall("[SERVER] Tu as été réduit au silence.".encode(FORMAT))
-            conn.sendall(f"[SERVER] {target_name} est maintenant muet.".encode(FORMAT))
+            send(target, "[SERVER] Tu as été réduit au silence.")
+            send(conn, f"[SERVER] {target_name} est maintenant muet.")
         else:
             with clients_lock:
                 clients[target]["muted"] = False
-            target.sendall("[SERVER] Tu peux à nouveau parler.".encode(FORMAT))
-            conn.sendall(f"[SERVER] {target_name} n'est plus muet.".encode(FORMAT))
+            send(target, "[SERVER] Tu peux à nouveau parler.")
+            send(conn, f"[SERVER] {target_name} n'est plus muet.")
         return True, None
 
     if cmd in ("/ban", "/unban"):
         if not has_level(my_role(conn), "admin"):
-            conn.sendall("[SERVER] Commande réservée aux admins.".encode(FORMAT))
+            send(conn, "[SERVER] Commande réservée aux admins.")
             return True, None
         if len(parts) < 2:
-            conn.sendall(f"[SERVER] Usage : {cmd} <pseudo>".encode(FORMAT))
+            send(conn, f"[SERVER] Usage : {cmd} <pseudo>")
             return True, None
         target_name = parts[1]
         if target_name == username:
-            conn.sendall("[SERVER] Tu ne peux pas te bannir toi-même.".encode(FORMAT))
+            send(conn, "[SERVER] Tu ne peux pas te bannir toi-même.")
             return True, None
         value = cmd == "/ban"
         if not set_banned_in_file(target_name, value):
-            conn.sendall(f"[SERVER] Utilisateur '{target_name}' introuvable.".encode(FORMAT))
+            send(conn, f"[SERVER] Utilisateur '{target_name}' introuvable.")
             return True, None
         if value:
             target = find_conn_by_name(target_name)
@@ -299,30 +306,30 @@ def handle_command(conn, addr, username, msg):
             broadcast(f"[SERVER] {target_name} a été banni.")
             print(f"[SERVER] {username} a ban {target_name}")
         else:
-            conn.sendall(f"[SERVER] {target_name} a été débanni.".encode(FORMAT))
+            send(conn, f"[SERVER] {target_name} a été débanni.")
         return True, None
 
     if cmd == "/online":
         with clients_lock:
             listing = ", ".join(f"{i['username']} ({i['role']}, {i['room']})" for i in clients.values())
-        conn.sendall(f"[SERVER] Connectés : {listing}".encode(FORMAT))
+        send(conn, f"[SERVER] Connectés : {listing}")
         return True, None
 
     if cmd == "/rooms":
         with rooms_lock:
             listing = ", ".join(sorted(rooms))
-        conn.sendall(f"[SERVER] Salons : {listing}".encode(FORMAT))
+        send(conn, f"[SERVER] Salons : {listing}")
         return True, None
 
     if cmd == "/join":
         if len(parts) < 2:
-            conn.sendall("[SERVER] Usage : /join <salon>".encode(FORMAT))
+            send(conn, "[SERVER] Usage : /join <salon>")
             return True, None
         room_name = parts[1]
         with clients_lock:
             old_room = clients[conn]["room"]
         if room_name == old_room:
-            conn.sendall("[SERVER] Tu es déjà dans ce salon.".encode(FORMAT))
+            send(conn, "[SERVER] Tu es déjà dans ce salon.")
             return True, None
         with rooms_lock:
             rooms.add(room_name)
@@ -331,21 +338,21 @@ def handle_command(conn, addr, username, msg):
             clients[conn]["room"] = room_name
         prune_room(old_room)
         broadcast(f"[SERVER] {username} a rejoint le salon.", room=room_name, exclude_conn=conn)
-        conn.sendall(f"[SERVER] Tu es maintenant dans le salon '{room_name}'.".encode(FORMAT))
+        send(conn, f"[SERVER] Tu es maintenant dans le salon '{room_name}'.")
         return True, None
 
     if cmd == "/leave":
         with clients_lock:
             old_room = clients[conn]["room"]
         if old_room == DEFAULT_ROOM:
-            conn.sendall("[SERVER] Tu es déjà dans le salon général.".encode(FORMAT))
+            send(conn, "[SERVER] Tu es déjà dans le salon général.")
             return True, None
         broadcast(f"[SERVER] {username} a quitté le salon.", room=old_room, exclude_conn=conn)
         with clients_lock:
             clients[conn]["room"] = DEFAULT_ROOM
         prune_room(old_room)
         broadcast(f"[SERVER] {username} a rejoint le salon.", room=DEFAULT_ROOM, exclude_conn=conn)
-        conn.sendall(f"[SERVER] Tu es de retour dans le salon '{DEFAULT_ROOM}'.".encode(FORMAT))
+        send(conn, f"[SERVER] Tu es de retour dans le salon '{DEFAULT_ROOM}'.")
         return True, None
 
     return False, None
@@ -356,19 +363,23 @@ def handle_client(conn, addr):
     username = None
     joined = False
     conn.settimeout(TIMEOUT)
+    buffer = ""
     try:
-        data = conn.recv(1024)
-        if not data:
-            return
-        username = clean_text(data.decode(FORMAT, errors="replace").strip())
+        while "\n" not in buffer:
+            data = conn.recv(1024)
+            if not data:
+                return
+            buffer += data.decode(FORMAT, errors="replace")
+        line, buffer = buffer.split("\n", 1)
+        username = clean_text(line.strip())
 
         if not valid_username(username):
-            conn.sendall("[SERVER] Pseudo invalide (3-20 caractères : lettres, chiffres, _ ou -).".encode(FORMAT))
+            send(conn, "[SERVER] Pseudo invalide (3-20 caractères : lettres, chiffres, _ ou -).")
             print(f"[SERVER] Pseudo refusé ({addr})")
             return
 
         if is_banned(username):
-            conn.sendall("[SERVER] Tu es banni de ce serveur.".encode(FORMAT))
+            send(conn, "[SERVER] Tu es banni de ce serveur.")
             print(f"[SERVER] {username} banni, connexion refusée ({addr})")
             return
 
@@ -379,47 +390,66 @@ def handle_client(conn, addr):
                              "addr": addr, "room": DEFAULT_ROOM}
         joined = True
 
-        conn.sendall(f"Bienvenue {username} ! (rôle : {role})".encode(FORMAT))
+        send(conn, f"Bienvenue {username} ! (rôle : {role})")
         broadcast(f"[SERVER] {username} a rejoint le chat.", room=DEFAULT_ROOM, exclude_conn=conn)
         print(f"[SERVER] {username} joined ({addr}) role={role}")
 
-        while True:
-            data = conn.recv(1024)
+        last_active = time.time()
+        conn.settimeout(CHECK_INTERVAL)
+        disconnect_flag = False
+
+        while not disconnect_flag:
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                msg = clean_text(line.strip())
+                if not msg:
+                    continue
+                if len(msg) > MAX_MSG_LEN:
+                    msg = msg[:MAX_MSG_LEN]
+
+                if msg == DISCONNECT_MESSAGE:
+                    disconnect_flag = True
+                    break
+
+                if msg.split()[0].lower() not in PASSIVE_COMMANDS:
+                    last_active = time.time()
+
+                if msg.startswith("/"):
+                    handled, new_name = handle_command(conn, addr, username, msg)
+                    if not handled:
+                        send(conn, f"[SERVER] Commande inconnue : {msg}")
+                    elif new_name:
+                        username = new_name
+                    continue
+
+                with clients_lock:
+                    info = clients.get(conn)
+                    muted = info["muted"] if info else False
+                    room = info["room"] if info else DEFAULT_ROOM
+                if muted:
+                    send(conn, "[SERVER] Tu es réduit au silence, ton message n'a pas été envoyé.")
+                    continue
+
+                print(f"[{room}][{username}] {msg}")
+                broadcast(f"[{stamp()}] [{username}] {msg}", room=room, exclude_conn=conn)
+
+            if disconnect_flag:
+                break
+
+            try:
+                data = conn.recv(1024)
+            except socket.timeout:
+                if time.time() - last_active > TIMEOUT:
+                    send(conn, "[SERVER] Déconnecté pour inactivité.")
+                    print(f"[SERVER] {addr} timeout.")
+                    break
+                continue
             if not data:
                 break
-            msg = clean_text(data.decode(FORMAT, errors="replace").strip())
-            if not msg:
-                continue
-            if len(msg) > MAX_MSG_LEN:
-                msg = msg[:MAX_MSG_LEN]
-
-            if msg == DISCONNECT_MESSAGE:
-                break
-
-            if msg.startswith("/"):
-                handled, new_name = handle_command(conn, addr, username, msg)
-                if not handled:
-                    conn.sendall(f"[SERVER] Commande inconnue : {msg}".encode(FORMAT))
-                elif new_name:
-                    username = new_name
-                continue
-
-            with clients_lock:
-                info = clients.get(conn)
-                muted = info["muted"] if info else False
-                room = info["room"] if info else DEFAULT_ROOM
-            if muted:
-                conn.sendall("[SERVER] Tu es réduit au silence, ton message n'a pas été envoyé.".encode(FORMAT))
-                continue
-
-            print(f"[{room}][{username}] {msg}")
-            broadcast(f"[{stamp()}] [{username}] {msg}", room=room, exclude_conn=conn)
+            buffer += data.decode(FORMAT, errors="replace")
 
     except socket.timeout:
-        try:
-            conn.sendall("[SERVER] Déconnecté pour inactivité.".encode(FORMAT))
-        except OSError:
-            pass
+        send(conn, "[SERVER] Déconnecté pour inactivité.")
         print(f"[SERVER] {addr} timeout.")
     except ConnectionResetError:
         print(f"[SERVER] ERROR : {addr} disconnected.")
